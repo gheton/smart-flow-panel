@@ -646,7 +646,7 @@ function calculateVolumeProfile(candles){
   else break;
  }
  const priceAt=i=>min+(i+.5)*step;
- return {rows,total,min,max,step,bins,poc,lo,hi,pocPrice:priceAt(poc),vah:min(max,min+(hi+1)*step),val:max(min,min+lo*step),count:rows.length,binCount};
+ return {rows,total,min,max,step,bins,poc,lo,hi,pocPrice:priceAt(poc),vah:Math.min(max,min+(hi+1)*step),val:Math.max(min,min+lo*step),count:rows.length,binCount};
 }
 function renderVolumeProfile(candles){
  const now=Date.now(),all=closedKlineRows(candles,300000,now);
