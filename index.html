@@ -178,7 +178,7 @@ footer{color:#91a4bc}
   • 24ч — скользящее окно, которое публикует Bybit, а не календарные сутки.<br>
   • CVD Buy/Sell/Delta за 5м / 15м / 1ч / 24ч рассчитывается по доступной REST-выборке и сделкам WebSocket с момента подключения. Звёздочка отмечает неполное покрытие окна; полная 24ч история не гарантируется.<br>
   • OI — сравнение доступных точек 5-минутной и часовой истории; метки цены/OI описывают сочетание динамики, но не доказывают направление позиций.<br>
-  • VWAP — приближение по часовым свечам; Volume Profile строится по 5-минутным свечам за 1ч/24ч, POC и Value Area (около 70%) являются оценкой по типичной цене свечи, не footprint.<br>
+  • VWAP — приближение по часовым свечам; Volume Profile строится по 5-минутным свечам за 1ч/24ч, POC и Value Area (около 70%) рассчитываются по распределению оборота внутри диапазонов high-low свечей, не footprint.<br>
   • Ликвидации: Buy означает ликвидацию лонга, Sell — шорта. Доступна история текущей сессии WebSocket; архивный REST-метод для публичной полной истории в этом мониторе не используется.<br>
   Панель описывает рыночные данные и не формирует торговых рекомендаций.
  </div>
@@ -610,44 +610,54 @@ function renderOIAnalysis(oi5,oi1h,k5){
  $("oiCoverage").textContent="5м OI: "+five.length+" точек"+(first5?" с "+new Date(first5.ts).toLocaleString("ru-RU"):"")+" · 1ч OI: "+hourly.length+" точек"+(firstHour?" с "+new Date(firstHour.ts).toLocaleString("ru-RU"):"")+". * — нет точного базового значения для всего окна.";
  oiHistory=[...five,...hourly].sort((a,b)=>a.ts-b.ts);
 }
+function closedKlineRows(candles, intervalMs=300000, now=Date.now()){
+ const boundary=Math.floor(now/intervalMs)*intervalMs;
+ return (candles||[]).map(c=>({
+  ts:Number(c[0]),high:Number(c[2]),low:Number(c[3]),close:Number(c[4]),turnover:Number(c[6])
+ })).filter(x=>Number.isFinite(x.ts)&&x.ts+intervalMs<=boundary&&x.high>0&&x.low>0&&x.close>0&&x.turnover>0&&x.high>=x.low).sort((a,b)=>a.ts-b.ts);
+}
 function calculateVolumeProfile(candles){
- const rows=(candles||[]).map(c=>({ts:Number(c[0]),high:Number(c[2]),low:Number(c[3]),close:Number(c[4]),turnover:Number(c[6])}))
-  .filter(x=>Number.isFinite(x.ts)&&x.high>0&&x.low>0&&x.close>0&&x.turnover>0&&x.high>=x.low)
-  .sort((a,b)=>a.ts-b.ts);
+ const rows=(candles||[]).filter(x=>x&&Number.isFinite(x.ts));
  if(!rows.length)return null;
  const min=Math.min(...rows.map(x=>x.low)),max=Math.max(...rows.map(x=>x.high));
- const step=max>min?(max-min)/24:Math.max(max*.0001,1e-8);
+ const binCount=48,step=max>min?(max-min)/binCount:Math.max(max*.0001,1e-8);
  const bins=new Map();
  for(const x of rows){
-  const typical=(x.high+x.low+x.close)/3;
-  const idx=Math.max(0,Math.min(23,Math.floor((typical-min)/step)));
-  bins.set(idx,(bins.get(idx)||0)+x.turnover);
+  const range=Math.max(x.high-x.low,step/1000);
+  const first=Math.max(0,Math.min(binCount-1,Math.floor((x.low-min)/step)));
+  const last=Math.max(0,Math.min(binCount-1,Math.floor((x.high-min)/step)));
+  for(let idx=first;idx<=last;idx++){
+   const binLow=min+idx*step,binHigh=binLow+step;
+   const overlap=Math.max(0,Math.min(x.high,binHigh)-Math.max(x.low,binLow));
+   const share=overlap>0?overlap/range:x.close>=binLow&&x.close<binHigh?1:0;
+   if(share>0)bins.set(idx,(bins.get(idx)||0)+x.turnover*share);
+  }
  }
  const sorted=[...bins.entries()].sort((a,b)=>a[0]-b[0]);
  if(!sorted.length)return null;
  const poc=[...sorted].sort((a,b)=>b[1]-a[1])[0][0];
- const total=sorted.reduce((s,x)=>s+x[1],0),target=total*.70;
+ const total=sorted.reduce((sum,item)=>sum+item[1],0),target=total*.70;
  let lo=poc,hi=poc,covered=bins.get(poc)||0;
- while(covered<target&&(lo>0||hi<23)){
+ while(covered<target&&(lo>0||hi<binCount-1)){
   const below=bins.get(lo-1)||0,above=bins.get(hi+1)||0;
-  if(above>below&&hi<23){hi++;covered+=above}
+  if(above>=below&&hi<binCount-1){hi++;covered+=above}
   else if(lo>0){lo--;covered+=below}
-  else if(hi<23){hi++;covered+=above}
+  else if(hi<binCount-1){hi++;covered+=above}
   else break;
  }
  const priceAt=i=>min+(i+.5)*step;
- return {rows,total,min,max,step,bins,poc,lo,hi,pocPrice:priceAt(poc),vah:Math.min(max,min+(hi+1)*step),val:Math.max(min,min+lo*step),count:rows.length};
+ return {rows,total,min,max,step,bins,poc,lo,hi,pocPrice:priceAt(poc),vah:min(max,min+(hi+1)*step),val:max(min,min+lo*step),count:rows.length,binCount};
 }
 function renderVolumeProfile(candles){
- const now=Date.now(),all=(candles||[]).filter(c=>Number(c[0])<=now).sort((a,b)=>Number(a[0])-Number(b[0]));
- const oneHour=all.filter(c=>Number(c[0])>=now-3600000),day=all.filter(c=>Number(c[0])>=now-86400000);
+ const now=Date.now(),all=closedKlineRows(candles,300000,now);
+ const oneHour=all.filter(c=>c.ts>=now-3600000),day=all.filter(c=>c.ts>=now-86400000);
  const p1=calculateVolumeProfile(oneHour),p24=calculateVolumeProfile(day);
  chartProfile=p24;
  const show=(p,prefix,coverage)=>{
   $(prefix+"poc").textContent=p?fmt(p.pocPrice,8):"—";
   $(prefix+"vah").textContent=p?fmt(p.vah,8):"—";
   $(prefix+"val").textContent=p?fmt(p.val,8):"—";
-  $(coverage).textContent=p?p.count+" свечей · "+money(p.total)+" оборота":"Недостаточно свечей";
+  $(coverage).textContent=p?p.count+" закрытых свечей · "+money(p.total)+" оборота":"Недостаточно свечей";
  };
  show(p1,"vp1","vp1coverage");show(p24,"vp24","vp24coverage");
  if(p24){
@@ -656,7 +666,7 @@ function renderVolumeProfile(candles){
   $("vpRows").innerHTML=levels.map(([idx,value])=>'<div style="display:grid;grid-template-columns:90px minmax(40px,1fr) 75px;gap:8px;align-items:center;padding:5px 0;border-bottom:1px solid var(--line)"><span style="font-size:10px">'+fmt(p24.min+(idx+.5)*p24.step,8)+'</span><div style="height:9px;background:#20352c;border-radius:8px;overflow:hidden"><div style="height:100%;width:'+Math.max(2,value/maxVol*100)+'%;background:'+(idx===p24.poc?'var(--green)':'var(--blue)')+'"></div></div><span class="muted" style="font-size:10px;text-align:right">'+money(value)+'</span></div>').join("");
   $("dvp").textContent="POC "+fmt(p24.pocPrice,8)+" · VAH "+fmt(p24.vah,8)+" · VAL "+fmt(p24.val,8);
  }else{$("vpRows").innerHTML='<div class="muted">Недостаточно данных для профиля за 24ч</div>';$("dvp").textContent="Недостаточно данных"}
- $("vpMethod").textContent="Расчётный охват: 1ч — "+oneHour.length+" свечей; 24ч — "+day.length+" свечей. POC — максимальный ценовой бин; VAH/VAL охватывают около 70% расчётного объёма.";
+ $("vpMethod").textContent="Расчёт по "+(p24?p24.binCount:48)+" ценовым бинам: оборот свечи распределяется по её диапазону high-low; текущая незакрытая свеча исключена. Value Area охватывает около 70% оборота.";
 }
 function renderCvdPeriods(){
  if(!cvdSymbol)return;
