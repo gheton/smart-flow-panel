@@ -119,10 +119,10 @@ footer{color:#91a4bc}
  <div class="toolbar"><button id="refresh">↻ Обновить сейчас</button><label class="muted" style="font-size:10px"><input type="checkbox" id="auto" checked style="vertical-align:middle"> авто 60 сек</label></div>
  <div class="controls" style="margin-top:8px">
   <button class="active" data-filter="all">Все</button><button data-filter="up">Рост за 24ч</button><button data-filter="down">Снижение за 24ч</button><button data-filter="flat">Изменение ±1%</button>
-  <select id="sort" aria-label="Сортировка"><option value="turnover">Оборот</option><option value="symbol">Контракт</option><option value="price">Цена</option><option value="change">Изменение 24ч</option><option value="hour">Изменение 1ч</option><option value="session">С начала UTC-дня</option><option value="oi">Открытый интерес</option><option value="funding">Funding</option></select>
+  <select id="sort" aria-label="Сортировка"><option value="turnover">Оборот</option><option value="symbol">Контракт</option><option value="price">Цена</option><option value="change">Изменение 24ч</option><option value="hour">Изменение 1ч</option><option value="five">Изменение 5м</option><option value="session">С начала UTC-дня</option><option value="oi">Открытый интерес</option><option value="funding">Funding</option></select>
  </div>
  <input class="search" id="search" placeholder="Поиск пары, например BTCUSDT">
- <div class="tablewrap"><table><thead><tr><th data-sort="symbol" tabindex="0" role="button">Контракт</th><th data-sort="price" tabindex="0" role="button">Цена</th><th data-sort="change" tabindex="0" role="button">24ч %</th><th data-sort="hour" tabindex="0" role="button">1ч %</th><th data-sort="session" tabindex="0" role="button">С начала UTC-дня %</th><th data-sort="turnover" tabindex="0" role="button">Оборот 24ч</th><th data-sort="oi" tabindex="0" role="button">OI value</th><th data-sort="funding" tabindex="0" role="button">Funding</th></tr></thead><tbody id="rows"><tr><td colspan="8" class="muted" style="text-align:center;padding:22px">Нажми «Обновить сейчас» для загрузки данных Bybit.</td></tr></tbody></table></div>
+ <div class="tablewrap"><table><thead><tr><th data-sort="symbol" tabindex="0" role="button">Контракт</th><th data-sort="price" tabindex="0" role="button">Цена</th><th data-sort="change" tabindex="0" role="button">24ч %</th><th data-sort="hour" tabindex="0" role="button">1ч %</th><th data-sort="five" tabindex="0" role="button">5м %</th><th data-sort="session" tabindex="0" role="button">С начала UTC-дня %</th><th data-sort="turnover" tabindex="0" role="button">Оборот 24ч</th><th data-sort="oi" tabindex="0" role="button">OI value</th><th data-sort="funding" tabindex="0" role="button">Funding</th></tr></thead><tbody id="rows"><tr><td colspan="9" class="muted" style="text-align:center;padding:22px">Нажми «Обновить сейчас» для загрузки данных Bybit.</td></tr></tbody></table></div>
  <div id="error" class="error"></div>
  <div class="toolbar" style="margin-top:9px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px">
   <input id="symbolInput" list="symbolOptions" placeholder="Тикер для анализа, например BTCUSDT" autocapitalize="characters" autocomplete="off" style="min-width:0;width:100%">
@@ -202,7 +202,7 @@ const MIN_TURNOVER=5_000_000;
 const $=id=>document.getElementById(id);
 let instruments=new Map(), market=[], selected=null, filter="all", detailSocket=null, detailPing=null, detailReconnectTimer=null, detailReconnectAttempt=0, detailSocketGeneration=0, liveCvd=0, liqBuy=0, liqSell=0, liqCount=0, detailBaseCvd=0, detailTradeCount=0, busy=false;
 let sortKey="turnover", sortDirection=-1;
-const HOUR_CACHE=new Map(), DAY_CACHE=new Map(), HOUR_CACHE_TTL=60000, PREFS_KEY="smartFlow.stage1.preferences.v1";
+const HOUR_CACHE=new Map(), FIVE_CACHE=new Map(), DAY_CACHE=new Map(), HOUR_CACHE_TTL=60000, FIVE_CACHE_TTL=30000, PREFS_KEY="smartFlow.stage1.preferences.v1";
 let cvdTrades=new Map(), cvdSymbol=null, detailRequestId=0, oiHistory=[], liquidationEvents=new Map();
 let chartExpandedSymbol=null, chartCandles=[], chartCandleSets={5:[],15:[],60:[]}, chartProfile=null, miniChart=null, fullChart=null, fullChartTf=5, chartDisplayMode="price", chartDisplayBase=NaN;
 let fullChartSeries=null, measureEnabled=false, measureStart=null, measureEnd=null, measureOverlay=null;
@@ -251,6 +251,9 @@ async function oneHourChange(symbol,lastPrice){
  const reference=candles.reduce((best,c)=>c.time>best.time?c:best,candles[0]);
  if(target-reference.time>3*60*1000)throw new Error("Недостаточно минутной истории для 1ч");
  const value=reference.close>0?(Number(lastPrice)/reference.close-1)*100:NaN;
+ const fiveTarget=now-5*60*1000;
+ const fiveReference=(r.list||[]).map(c=>({time:Number(c[0]),close:Number(c[4])})).filter(c=>c.time<=fiveTarget&&c.close>0).reduce((best,c)=>c.time>best.time?c:best,{time:-1,close:NaN});
+ if(fiveReference.time>=0&&fiveReference.close>0)FIVE_CACHE.set(symbol,{time:now,value:(Number(lastPrice)/fiveReference.close-1)*100});
  HOUR_CACHE.set(symbol,{time:now,value});return value;
 }
 function utcDayKey(date=new Date()){return date.toISOString().slice(0,10)}
@@ -273,7 +276,7 @@ async function mapLimit(items,limit,worker){
 }
 async function updateHourlyChanges(){
  const targets=market.filter(x=>{const c=HOUR_CACHE.get(x.symbol);return !c||Date.now()-c.time>=HOUR_CACHE_TTL});
- await mapLimit(targets,4,async x=>{x.hour=await oneHourChange(x.symbol,x.lastPrice)});
+ await mapLimit(targets,4,async x=>{x.hour=await oneHourChange(x.symbol,x.lastPrice);x.five=FIVE_CACHE.get(x.symbol)?.value??NaN});
  render();
  if(selected){const current=market.find(x=>x.symbol===selected);if(current)renderQuickDetail(current)}
 }
@@ -291,7 +294,7 @@ async function loadMarket(){
   instruments=new Map(ins.map(x=>[x.symbol,x]));
   const ticks=tick.list||[];
   market=ticks.filter(t=>instruments.has(t.symbol)&&Number(t.turnover24h)>=MIN_TURNOVER).map(t=>({
-   ...t,change:Number(t.price24hPcnt)*100,hour:HOUR_CACHE.get(t.symbol)?.value??NaN,session:DAY_CACHE.get(t.symbol)?.value??NaN,turn:Number(t.turnover24h),oiValue:Number(t.openInterestValue),fund:Number(t.fundingRate)*100
+   ...t,change:Number(t.price24hPcnt)*100,hour:HOUR_CACHE.get(t.symbol)?.value??NaN,five:FIVE_CACHE.get(t.symbol)?.value??NaN,session:DAY_CACHE.get(t.symbol)?.value??NaN,turn:Number(t.turnover24h),oiValue:Number(t.openInterestValue),fund:Number(t.fundingRate)*100
   }));
   $("count").textContent=market.length;
   $("updated").textContent=new Date().toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
@@ -303,10 +306,10 @@ async function loadMarket(){
  }catch(e){
   $("status").className="status bad";$("status").textContent="Нет подключения";
   $("error").textContent="Не удалось загрузить публичные данные: "+e.message+". Проверь интернет, доступность api.bybit.com и попробуй открыть файл в браузере Chrome.";
-  if(!market.length)$("rows").innerHTML='<tr><td colspan="8" style="text-align:center;padding:20px" class="muted">Данные пока недоступны. Повтори загрузку.</td></tr>';
+  if(!market.length)$("rows").innerHTML='<tr><td colspan="9" style="text-align:center;padding:20px" class="muted">Данные пока недоступны. Повтори загрузку.</td></tr>';
  }finally{busy=false;$("refresh").disabled=false}
 }
-function sortValue(x,key){return key==="symbol"?x.symbol:key==="price"?Number(x.lastPrice):key==="change"?x.change:key==="hour"?x.hour:key==="session"?x.session:key==="oi"?x.oiValue:key==="funding"?x.fund:x.turn}
+function sortValue(x,key){return key==="symbol"?x.symbol:key==="price"?Number(x.lastPrice):key==="change"?x.change:key==="hour"?x.hour:key==="five"?x.five:key==="session"?x.session:key==="oi"?x.oiValue:key==="funding"?x.fund:x.turn}
 function sortMarket(arr){
  arr.sort((a,b)=>{const av=sortValue(a,sortKey),bv=sortValue(b,sortKey),an=typeof av==="number"&&!Number.isFinite(av),bn=typeof bv==="number"&&!Number.isFinite(bv);if(an||bn)return an===bn?a.symbol.localeCompare(b.symbol):an?1:-1;if(typeof av==="string")return sortDirection*av.localeCompare(bv);const d=(av-bv)*sortDirection;return d||a.symbol.localeCompare(b.symbol)});
  return arr;
@@ -496,14 +499,15 @@ function render(){
  <td>${fmt(Number(x.lastPrice),8)}</td>
  <td class="${x.change>0?"pos":x.change<0?"neg":"neutral"}">${pct(x.change)}</td>
  <td class="${x.hour>0?"pos":x.hour<0?"neg":"neutral"}">${pct(x.hour)}</td>
+ <td class="${x.five>0?"pos":x.five<0?"neg":"neutral"}">${pct(x.five)}</td>
  <td class="${x.session>0?"pos":x.session<0?"neg":"neutral"}">${pct(x.session)}</td>
  <td>${money(x.turn)}</td><td>${money(x.oiValue)}</td>
- <td class="${x.fund>0?"pos":x.fund<0?"neg":"neutral"}">${pct(x.fund)}</td></tr>`).join("")||'<tr><td colspan="8" style="text-align:center;padding:20px" class="muted">Нет контрактов по заданному фильтру.</td></tr>';
+ <td class="${x.fund>0?"pos":x.fund<0?"neg":"neutral"}">${pct(x.fund)}</td></tr>`).join("")||'<tr><td colspan="9" style="text-align:center;padding:20px" class="muted">Нет контрактов по заданному фильтру.</td></tr>';
  if(chartExpandedSymbol&&selected===chartExpandedSymbol){
   const row=$("rows").querySelector('tr[data-symbol="'+chartExpandedSymbol+'"]');
   if(row){
    const detail=document.createElement("tr");detail.className="chart-expansion";
-   detail.innerHTML='<td colspan="8"><div class="chart-preview" id="miniChartTap"><div class="chart-preview-head"><strong>График · '+esc(chartExpandedSymbol)+' · 5м</strong><span class="pill">Открыть на весь экран ↗</span></div><div id="miniChart" class="chart-mini"></div><div class="chart-level-legend"><span><i style="background:#f5c86a"></i>POC</span><span><i style="background:#80baff"></i>VAH</span><span><i style="background:#ff737d"></i>VAL</span></div></div></td>';
+   detail.innerHTML='<td colspan="9"><div class="chart-preview" id="miniChartTap"><div class="chart-preview-head"><strong>График · '+esc(chartExpandedSymbol)+' · 5м</strong><span class="pill">Открыть на весь экран ↗</span></div><div id="miniChart" class="chart-mini"></div><div class="chart-level-legend"><span><i style="background:#f5c86a"></i>POC</span><span><i style="background:#80baff"></i>VAH</span><span><i style="background:#ff737d"></i>VAL</span></div></div></td>';
    row.after(detail);$("miniChartTap").addEventListener("click",openFullChart);drawMiniChart();
   }
  }
@@ -524,7 +528,7 @@ function restorePreferences(){
   const p=JSON.parse(localStorage.getItem(PREFS_KEY)||"null");if(!p||typeof p!=="object")return;
   if(["all","up","down","flat"].includes(p.filter))filter=p.filter;
   if(typeof p.search==="string")$("search").value=p.search;
-  if(["symbol","price","change","hour","session","turnover","oi","funding"].includes(p.sortKey))sortKey=p.sortKey;
+  if(["symbol","price","change","hour","five","session","turnover","oi","funding"].includes(p.sortKey))sortKey=p.sortKey;
   if(p.sortDirection===1||p.sortDirection===-1)sortDirection=p.sortDirection;
   if(typeof p.auto==="boolean")$("auto").checked=p.auto;
   document.querySelectorAll("button[data-filter]").forEach(b=>b.classList.toggle("active",b.dataset.filter===filter));
