@@ -257,17 +257,24 @@ async function oneHourChange(symbol,lastPrice){
  HOUR_CACHE.set(symbol,{time:now,value});return value;
 }
 function utcDayKey(date=new Date()){return date.toISOString().slice(0,10)}
+function cachedSessionChange(symbol,lastPrice){
+ const cached=DAY_CACHE.get(symbol),day=utcDayKey(),price=Number(lastPrice),open=Number(cached?.open);
+ if(!cached||cached.day!==day||!(open>0)||!(price>0))return NaN;
+ const value=(price/open-1)*100;
+ cached.value=value;
+ return value;
+}
 async function sessionChange(symbol,lastPrice){
  const day=utcDayKey(),cached=DAY_CACHE.get(symbol);
- if(cached&&cached.day===day)return cached.value;
+ if(cached&&cached.day===day&&Number(cached.open)>0)return cachedSessionChange(symbol,lastPrice);
  const q=new URLSearchParams({category:"linear",symbol,interval:"D",limit:"2"});
  const r=await api("/v5/market/kline?"+q);
  const start=Date.UTC(new Date().getUTCFullYear(),new Date().getUTCMonth(),new Date().getUTCDate());
  const rows=(r.list||[]).map(c=>({time:Number(c[0]),open:Number(c[1])})).filter(c=>c.time<=Date.now()&&c.open>0);
  const candle=rows.find(c=>c.time===start)||rows.reduce((best,c)=>!best||c.time>best.time?c:best,null);
  if(!candle)throw new Error("Нет цены открытия UTC-дня");
- const value=(Number(lastPrice)/candle.open-1)*100;
- DAY_CACHE.set(symbol,{day,value});return value;
+ const open=Number(candle.open),value=(Number(lastPrice)/open-1)*100;
+ DAY_CACHE.set(symbol,{day,open,value});return value;
 }
 async function mapLimit(items,limit,worker){
  let next=0;
@@ -282,7 +289,7 @@ async function updateHourlyChanges(){
 }
 async function updateSessionChanges(){
  const day=utcDayKey();
- const targets=market.filter(x=>DAY_CACHE.get(x.symbol)?.day!==day);
+ const targets=market.filter(x=>{const c=DAY_CACHE.get(x.symbol);return !c||c.day!==day||!(Number(c.open)>0)});
  await mapLimit(targets,4,async x=>{x.session=await sessionChange(x.symbol,x.lastPrice)});
  render();
  if(selected){const current=market.find(x=>x.symbol===selected);if(current)renderQuickDetail(current)}
@@ -294,7 +301,7 @@ async function loadMarket(){
   instruments=new Map(ins.map(x=>[x.symbol,x]));
   const ticks=tick.list||[];
   market=ticks.filter(t=>instruments.has(t.symbol)&&Number(t.turnover24h)>=MIN_TURNOVER).map(t=>({
-   ...t,change:Number(t.price24hPcnt)*100,hour:HOUR_CACHE.get(t.symbol)?.value??NaN,five:FIVE_CACHE.get(t.symbol)?.value??NaN,session:DAY_CACHE.get(t.symbol)?.value??NaN,turn:Number(t.turnover24h),oiValue:Number(t.openInterestValue),fund:Number(t.fundingRate)*100
+   ...t,change:Number(t.price24hPcnt)*100,hour:HOUR_CACHE.get(t.symbol)?.value??NaN,five:FIVE_CACHE.get(t.symbol)?.value??NaN,session:cachedSessionChange(t.symbol,Number(t.lastPrice)),turn:Number(t.turnover24h),oiValue:Number(t.openInterestValue),fund:Number(t.fundingRate)*100
   }));
   $("count").textContent=market.length;
   $("updated").textContent=new Date().toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
